@@ -15,8 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws/defaults"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
-	"github.com/awslabs/aws-sdk-go/aws/defaults"
 	"github.com/otm/cloudwatch-alarm-exporter/alertmanager"
 	"github.com/otm/cloudwatch-alarm-exporter/collector"
 	"github.com/prometheus/client_golang/prometheus"
