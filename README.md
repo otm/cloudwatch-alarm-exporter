@@ -5,8 +5,3 @@ This exporter exposes the state of the CloudWatch alarms. It is also possible to
 Building the project is straight forward by using `go get`
 
  go get github.com/otm/cloudwatch-alarm-exporter
-
-## Installing
-1. Download binary for your architecture from https://github.com/otm/cloudwatch-alarm-exporter/releases/latest
-2. Make it executable: `chmod +x /usr/local/bin/git-build-state`
-3. Copy the file to `/usr/local/bin` or appropriate location in PATH

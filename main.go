@@ -15,7 +15,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws/defaults"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/cloudwatch"
 	"github.com/otm/cloudwatch-alarm-exporter/alertmanager"
 	"github.com/otm/cloudwatch-alarm-exporter/collector"
@@ -34,12 +35,18 @@ func main() {
 		*regionFlag = os.Getenv("AWS_REGION")
 	}
 
-	defaults.DefaultConfig = defaults.DefaultConfig.WithRegion(*regionFlag).WithMaxRetries(*retriesFlag)
+	sess, err := session.NewSession(&aws.Config{
+		Region:     regionFlag,
+		MaxRetries: retriesFlag,
+	})
 
-	// cw := cloudwatch.New(nil)
+	if err != nil {
+		log.Fatalf("Unable to create session: %s", err)
+	}
+
+	cw := cloudwatch.New(sess)
 	ca := CloudwatchAlarms{
-		//alarmDescriber: cw,
-		alarmDescriber: &cloudwatchMock{},
+		alarmDescriber: cw,
 	}
 
 	if *alertManagerFlag != "" {

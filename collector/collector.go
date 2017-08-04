@@ -113,7 +113,6 @@ func (c *CloudWatchAlarms) Collect(ch chan<- prometheus.Metric) {
 	elapsed := time.Since(start)
 	c.totalScrapeDuration.Observe(float64(elapsed.Seconds()))
 	ch <- c.totalScrapeDuration
-	log.Println(elapsed.Seconds())
 }
 
 // Describe implements the Prometheus Describer interface

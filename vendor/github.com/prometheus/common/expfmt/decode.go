@@ -31,72 +31,52 @@ type Decoder interface {
 	Decode(*dto.MetricFamily) error
 }
 
+// DecodeOptions contains options used by the Decoder and in sample extraction.
 type DecodeOptions struct {
 	// Timestamp is added to each value from the stream that has no explicit timestamp set.
 	Timestamp model.Time
 }
 
 // ResponseFormat extracts the correct format from a HTTP response header.
-func ResponseFormat(h http.Header) (Format, error) {
+// If no matching format can be found FormatUnknown is returned.
+func ResponseFormat(h http.Header) Format {
 	ct := h.Get(hdrContentType)
 
 	mediatype, params, err := mime.ParseMediaType(ct)
 	if err != nil {
-		return "", fmt.Errorf("invalid Content-Type header %q: %s", ct, err)
+		return FmtUnknown
 	}
 
-	const (
-		textType = "text/plain"
-		jsonType = "application/json"
-	)
+	const textType = "text/plain"
 
 	switch mediatype {
 	case ProtoType:
-		if p := params["proto"]; p != ProtoProtocol {
-			return "", fmt.Errorf("unrecognized protocol message %s", p)
+		if p, ok := params["proto"]; ok && p != ProtoProtocol {
+			return FmtUnknown
 		}
-		if e := params["encoding"]; e != "delimited" {
-			return "", fmt.Errorf("unsupported encoding %s", e)
+		if e, ok := params["encoding"]; ok && e != "delimited" {
+			return FmtUnknown
 		}
-		return FmtProtoDelim, nil
+		return FmtProtoDelim
 
 	case textType:
 		if v, ok := params["version"]; ok && v != TextVersion {
-			return "", fmt.Errorf("unrecognized protocol version %s", v)
+			return FmtUnknown
 		}
-		return FmtText, nil
-
-	case jsonType:
-		var prometheusAPIVersion string
-
-		if params["schema"] == "prometheus/telemetry" && params["version"] != "" {
-			prometheusAPIVersion = params["version"]
-		} else {
-			prometheusAPIVersion = h.Get("X-Prometheus-API-Version")
-		}
-
-		switch prometheusAPIVersion {
-		case "0.0.2":
-			return FmtJSON2, nil
-		default:
-			return "", fmt.Errorf("unrecognized API version %s", prometheusAPIVersion)
-		}
+		return FmtText
 	}
 
-	return "", fmt.Errorf("unsupported media type %q, expected %q or %q", mediatype, ProtoType, textType)
+	return FmtUnknown
 }
 
-// NewDecoder returns a new decoder based on the HTTP header.
-func NewDecoder(r io.Reader, format Format) (Decoder, error) {
+// NewDecoder returns a new decoder based on the given input format.
+// If the input format does not imply otherwise, a text format decoder is returned.
+func NewDecoder(r io.Reader, format Format) Decoder {
 	switch format {
 	case FmtProtoDelim:
-		return &protoDecoder{r: r}, nil
-	case FmtText:
-		return &textDecoder{r: r}, nil
-	case FmtJSON2:
-		return newJSON2Decoder(r), nil
+		return &protoDecoder{r: r}
 	}
-	return nil, fmt.Errorf("unsupported decoding format %q", format)
+	return &textDecoder{r: r}
 }
 
 // protoDecoder implements the Decoder interface for protocol buffers.
@@ -107,10 +87,32 @@ type protoDecoder struct {
 // Decode implements the Decoder interface.
 func (d *protoDecoder) Decode(v *dto.MetricFamily) error {
 	_, err := pbutil.ReadDelimited(d.r, v)
-	return err
+	if err != nil {
+		return err
+	}
+	if !model.IsValidMetricName(model.LabelValue(v.GetName())) {
+		return fmt.Errorf("invalid metric name %q", v.GetName())
+	}
+	for _, m := range v.GetMetric() {
+		if m == nil {
+			continue
+		}
+		for _, l := range m.GetLabel() {
+			if l == nil {
+				continue
+			}
+			if !model.LabelValue(l.GetValue()).IsValid() {
+				return fmt.Errorf("invalid label value %q", l.GetValue())
+			}
+			if !model.LabelName(l.GetName()).IsValid() {
+				return fmt.Errorf("invalid label name %q", l.GetName())
+			}
+		}
+	}
+	return nil
 }
 
-// textDecoder implements the Decoder interface for the text protcol.
+// textDecoder implements the Decoder interface for the text protocol.
 type textDecoder struct {
 	r    io.Reader
 	p    TextParser
@@ -129,17 +131,20 @@ func (d *textDecoder) Decode(v *dto.MetricFamily) error {
 		if len(fams) == 0 {
 			return io.EOF
 		}
+		d.fams = make([]*dto.MetricFamily, 0, len(fams))
 		for _, f := range fams {
 			d.fams = append(d.fams, f)
 		}
 	}
 
-	*v = *d.fams[len(d.fams)-1]
-	d.fams = d.fams[:len(d.fams)-1]
+	*v = *d.fams[0]
+	d.fams = d.fams[1:]
 
 	return nil
 }
 
+// SampleDecoder wraps a Decoder to extract samples from the metric families
+// decoded by the wrapped Decoder.
 type SampleDecoder struct {
 	Dec  Decoder
 	Opts *DecodeOptions
@@ -147,37 +152,51 @@ type SampleDecoder struct {
 	f dto.MetricFamily
 }
 
+// Decode calls the Decode method of the wrapped Decoder and then extracts the
+// samples from the decoded MetricFamily into the provided model.Vector.
 func (sd *SampleDecoder) Decode(s *model.Vector) error {
-	if err := sd.Dec.Decode(&sd.f); err != nil {
+	err := sd.Dec.Decode(&sd.f)
+	if err != nil {
 		return err
 	}
-	*s = extractSamples(&sd.f, sd.Opts)
-	return nil
+	*s, err = extractSamples(&sd.f, sd.Opts)
+	return err
 }
 
-// Extract samples builds a slice of samples from the provided metric families.
-func ExtractSamples(o *DecodeOptions, fams ...*dto.MetricFamily) model.Vector {
-	var all model.Vector
+// ExtractSamples builds a slice of samples from the provided metric
+// families. If an error occurs during sample extraction, it continues to
+// extract from the remaining metric families. The returned error is the last
+// error that has occured.
+func ExtractSamples(o *DecodeOptions, fams ...*dto.MetricFamily) (model.Vector, error) {
+	var (
+		all     model.Vector
+		lastErr error
+	)
 	for _, f := range fams {
-		all = append(all, extractSamples(f, o)...)
+		some, err := extractSamples(f, o)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		all = append(all, some...)
 	}
-	return all
+	return all, lastErr
 }
 
-func extractSamples(f *dto.MetricFamily, o *DecodeOptions) model.Vector {
+func extractSamples(f *dto.MetricFamily, o *DecodeOptions) (model.Vector, error) {
 	switch f.GetType() {
 	case dto.MetricType_COUNTER:
-		return extractCounter(o, f)
+		return extractCounter(o, f), nil
 	case dto.MetricType_GAUGE:
-		return extractGauge(o, f)
+		return extractGauge(o, f), nil
 	case dto.MetricType_SUMMARY:
-		return extractSummary(o, f)
+		return extractSummary(o, f), nil
 	case dto.MetricType_UNTYPED:
-		return extractUntyped(o, f)
+		return extractUntyped(o, f), nil
 	case dto.MetricType_HISTOGRAM:
-		return extractHistogram(o, f)
+		return extractHistogram(o, f), nil
 	}
-	panic("expfmt.extractSamples: unknown metric family type")
+	return nil, fmt.Errorf("expfmt.extractSamples: unknown metric family type %v", f.GetType())
 }
 
 func extractCounter(o *DecodeOptions, f *dto.MetricFamily) model.Vector {
