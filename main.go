@@ -21,6 +21,7 @@ import (
 	"github.com/otm/cloudwatch-alarm-exporter/alertmanager"
 	"github.com/otm/cloudwatch-alarm-exporter/collector"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
@@ -69,7 +70,7 @@ func main() {
 	}
 
 	prometheus.Unregister(prometheus.NewGoCollector())
-	prometheus.Unregister(prometheus.NewProcessCollector(os.Getpid(), ""))
+	prometheus.Unregister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{PidFn: nil, Namespace: "", ReportErrors: true}))
 	prometheus.MustRegister(collector.New(&ca))
 
 	server := httpServer{
@@ -153,7 +154,7 @@ func (hs *httpServer) listen() {
 	handler.HandleFunc("/healthcheck", hs.healthcheck)
 	handler.HandleFunc("/alarms", hs.activeAlarms)
 	handler.HandleFunc("/", hs.root)
-	handler.Handle("/metrics", prometheus.UninstrumentedHandler())
+	handler.Handle("/metrics", promhttp.Handler())
 
 	err := http.Serve(hs.listener, handler)
 
